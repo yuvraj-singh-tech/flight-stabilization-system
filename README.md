@@ -1,11 +1,7 @@
 <h1 align="center"><b>Real-Time Flight Stabilization System (RT-FSS)</b></h1>
 
 <p align="center">
-  <b>FPGA Hardware Pipeline for Real-Time Pitch Stabilization</b>
-</p>
-
-<p align="center">
-  <b>Implemented on the Xilinx Spartan-7 (SP701) FPGA development platform</b>
+  <b>FPGA-Based Hardware Pipeline for Real-Time Pitch Stabilization</b>
 </p>
 
 <p align="center">
@@ -18,9 +14,11 @@
 
 The **Real-Time Flight Stabilization System (RT-FSS)** is an FPGA-based control system designed to **maintain and correct the pitch orientation of a flight platform in real time**.
 
-When the platform tilts due to motion or external disturbance, RT-FSS continuously senses the motion, estimates the **pitch angle**, computes corrective control output, and updates the actuator signal to restore stable pitch.
+The system is implemented and tested on the **Xilinx Spartan-7 SP701 FPGA development board**.
 
-The complete stabilization path is implemented directly in **Verilog RTL**, forming a **deterministic real-time hardware pipeline** on FPGA.
+When the platform tilts due to motion or external disturbances, RT-FSS continuously senses the motion, estimates the **pitch angle**, computes the corrective control output, and updates the actuator signal to restore stable pitch.
+
+The complete stabilization path is implemented directly in **Verilog RTL**, forming a **deterministic real-time hardware pipeline** on the FPGA.
 
 Instead of relying on a processor-based software loop, the system performs stabilization using **dedicated digital hardware**, enabling predictable timing and consistent control behavior.
 
@@ -44,10 +42,10 @@ The goal of RT-FSS is to demonstrate how **real-time flight stabilization can be
 
 The system forms a complete hardware feedback loop that:
 
-- senses platform motion
-- estimates the pitch angle
-- computes corrective pitch control output
-- generates actuator PWM drive signals
+- senses platform motion  
+- estimates the pitch angle  
+- computes corrective pitch control output  
+- generates actuator PWM drive signals  
 
 This architecture shows how **sensor-driven control systems can be implemented as deterministic hardware pipelines**.
 
@@ -66,8 +64,8 @@ These measurements allow the system to determine how the platform is tilting and
 
 The sensor communicates with the FPGA through **I²C**, which uses two signal lines:
 
-- **SCL** — clock line
-- **SDA** — data line
+- **SCL** — clock line  
+- **SDA** — data line  
 
 Sensor data is acquired by the `mpu6050_reader` module and forwarded into the stabilization pipeline.
 
@@ -99,9 +97,9 @@ Synchronizes the reset signal with the FPGA clock.
 
 **Purpose:**
 
-- ensures reliable system startup
-- prevents metastability
-- initializes the system safely
+- ensures reliable system startup  
+- prevents metastability  
+- initializes the system safely  
 
 ---
 
@@ -111,9 +109,9 @@ Generates the timing base for the stabilization loop.
 
 **Purpose:**
 
-- controls when the control loop executes
-- maintains the **1000 updates per second** stabilization rate
-- synchronizes system operation
+- controls when the control loop executes  
+- maintains the **1000 updates per second** stabilization rate  
+- synchronizes system operation  
 
 ---
 
@@ -123,9 +121,9 @@ Handles motion-data acquisition from the MPU6050 sensor.
 
 **Purpose:**
 
-- reads accelerometer and gyroscope values
-- performs sensor communication through **I²C**
-- supplies motion measurements to the control pipeline
+- reads accelerometer and gyroscope values  
+- performs sensor communication through **I²C**  
+- supplies motion measurements to the control pipeline  
 
 ---
 
@@ -135,9 +133,9 @@ Estimates the **pitch angle** from sensor measurements.
 
 **Purpose:**
 
-- processes motion data
-- produces a stable pitch estimate
-- provides the orientation input for correction
+- processes motion data  
+- produces a stable pitch estimate  
+- provides the orientation input for correction  
 
 ---
 
@@ -147,9 +145,9 @@ Computes the corrective output required to reduce pitch error.
 
 **Purpose:**
 
-- compares measured pitch with target pitch
-- calculates correction using PID control
-- generates actuator command
+- compares measured pitch with target pitch  
+- calculates correction using PID control  
+- generates actuator command  
 
 ---
 
@@ -159,23 +157,23 @@ Converts the control output into a PWM signal.
 
 **Purpose:**
 
-- generates actuator drive signal
-- updates the actuator command every control cycle
-- applies stabilization correction
+- generates actuator drive signal  
+- updates the actuator command every control cycle  
+- applies stabilization correction  
 
 ---
 
-## Why FPGA is Used
+## Why FPGA Is Used
 
-RT-FSS is implemented on FPGA to achieve **deterministic real-time control performance**.
+RT-FSS is implemented on an FPGA to achieve **deterministic real-time control performance**.
 
-Using FPGA provides:
+Using an FPGA provides:
 
-- predictable timing
-- low control latency
-- parallel hardware execution
-- dedicated signal-processing pipeline
-- reliable real-time operation
+- predictable timing  
+- low control latency  
+- parallel hardware execution  
+- dedicated signal-processing pipeline  
+- reliable real-time operation  
 
 Instead of executing stabilization through sequential software instructions, the FPGA design behaves like a **dedicated hardware stabilization engine**.
 
@@ -191,13 +189,13 @@ Such architectures are increasingly important in **modern aerospace systems, rob
 
 ---
 
-## What This Project Demonstrates
+## Project Features
 
 RT-FSS demonstrates:
 
-- real-time pitch stabilization
+- **Real-time pitch stabilization**
 - hardware control loops running **1000 times per second**
-- sensor-driven closed-loop control
-- FPGA-based deterministic control execution
-- modular Verilog RTL system architecture
-- complete sensor-to-actuator stabilization pipeline
+- **sensor-driven closed-loop control**
+- **FPGA-based deterministic control execution**
+- **modular Verilog RTL system architecture**
+- **complete sensor-to-actuator stabilization pipeline**
