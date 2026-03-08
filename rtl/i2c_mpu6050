@@ -1,3 +1,4 @@
+`timescale 1ns / 1ps
 // -----------------------------------------------------------------------------
 // Module: i2c_mpu6050
 // Project: Real-Time Flight Stabilization System (RT-FSS)
