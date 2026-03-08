@@ -1,0 +1,444 @@
+// -----------------------------------------------------------------------------
+// Module: i2c_mpu6050
+// Project: Real-Time Flight Stabilization System (RT-FSS)
+// Author: Yuvraj Singh
+//
+// Description:
+// I2C interface for the MPU6050 sensor.
+//
+// This module performs a single 16-bit register read using the sequence:
+//   START -> SLA+W -> REG -> REP-START -> SLA+R -> MSB -> LSB -> STOP
+//
+// On the first transaction after reset, the sensor is automatically woken up
+// by writing 0x00 to the power management register (0x6B). A watchdog is
+// included to prevent the interface from hanging in a stalled transaction.
+// -----------------------------------------------------------------------------
+
+module i2c_mpu6050 #(
+    parameter CLK_FREQ_HZ = 33_333_333,
+    parameter I2C_FREQ_HZ = 400_000
+)(
+    input  wire        clk,
+    input  wire        rst,
+
+    input  wire        start,
+    input  wire [7:0]  reg_addr,
+
+    output reg         busy,
+    output reg         done,
+    output reg         error,
+
+    output wire        scl,
+    inout  wire        sda,
+
+    output reg [15:0]  data_out,
+    output reg         init_done
+);
+
+    // Clock divider for SCL generation
+    localparam integer SCL_DIV =
+        (CLK_FREQ_HZ + (2 * I2C_FREQ_HZ - 1)) / (2 * I2C_FREQ_HZ);
+
+    localparam [6:0] MPU_ADDR     = 7'h68;
+    localparam [7:0] REG_PWR_MGMT = 8'h6B;
+    localparam [7:0] PWR_MGMT_VAL = 8'h00;
+
+    localparam [1:0]
+        OP_READ = 2'd0,
+        OP_INIT = 2'd1;
+
+    reg [1:0] op_mode;
+
+    // SCL generation
+    reg        scl_int;
+    reg        scl_prev;
+    reg [15:0] scl_cnt;
+
+    wire scl_rise = (scl_int == 1'b1) && (scl_prev == 1'b0);
+    wire scl_fall = (scl_int == 1'b0) && (scl_prev == 1'b1);
+
+    assign scl = scl_int;
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            scl_int  <= 1'b1;
+            scl_prev <= 1'b1;
+            scl_cnt  <= 16'd0;
+        end else if (busy) begin
+            scl_prev <= scl_int;
+            if (scl_cnt == (SCL_DIV - 1)) begin
+                scl_cnt <= 16'd0;
+                scl_int <= ~scl_int;
+            end else begin
+                scl_cnt <= scl_cnt + 16'd1;
+            end
+        end else begin
+            scl_int  <= 1'b1;
+            scl_prev <= 1'b1;
+            scl_cnt  <= 16'd0;
+        end
+    end
+
+    // Open-drain style SDA control
+    reg sda_oe;
+    reg sda_out;
+
+    assign sda   = (sda_oe) ? sda_out : 1'bz;
+    wire  sda_in = sda;
+
+    // State machine
+    localparam [4:0]
+        ST_IDLE          = 5'd0,
+        ST_START         = 5'd1,
+        ST_ADDR_WR       = 5'd2,
+        ST_ADDR_WR_ACK   = 5'd3,
+        ST_REG_ADDR      = 5'd4,
+        ST_REG_ADDR_ACK  = 5'd5,
+        ST_REP_START     = 5'd6,
+        ST_ADDR_RD       = 5'd7,
+        ST_ADDR_RD_ACK   = 5'd8,
+        ST_READ_MSB      = 5'd9,
+        ST_MASTER_ACK    = 5'd10,
+        ST_READ_LSB      = 5'd11,
+        ST_MASTER_NACK   = 5'd12,
+        ST_STOP          = 5'd13,
+        ST_DONE          = 5'd14,
+        ST_INIT_DATA     = 5'd15,
+        ST_INIT_DATA_ACK = 5'd16;
+
+    (* mark_debug = "true" *) reg [4:0] state;
+    (* mark_debug = "true" *) reg [3:0] bit_cnt;
+    (* mark_debug = "true" *) reg [7:0] tx_shift;
+
+    reg [7:0] msb_reg, lsb_reg;
+    reg [7:0] reg_addr_lat;
+    reg [7:0] pending_reg_addr;
+    reg       have_pending;
+    reg       need_init;
+
+    // Start pulse detection
+    reg start_q;
+    wire start_pulse = start & ~start_q;
+
+    always @(posedge clk or posedge rst) begin
+        if (rst)
+            start_q <= 1'b0;
+        else
+            start_q <= start;
+    end
+
+    // Transaction watchdog
+    localparam integer WD_TIMEOUT_CLKS = (CLK_FREQ_HZ / 200);
+
+    reg [23:0] wd_cnt;
+    wire       wd_hit = (wd_cnt >= WD_TIMEOUT_CLKS[23:0]);
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            wd_cnt <= 24'd0;
+        end else if (busy) begin
+            if (!wd_hit)
+                wd_cnt <= wd_cnt + 24'd1;
+        end else begin
+            wd_cnt <= 24'd0;
+        end
+    end
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            state            <= ST_IDLE;
+            busy             <= 1'b0;
+            done             <= 1'b0;
+            error            <= 1'b0;
+            sda_oe           <= 1'b0;
+            sda_out          <= 1'b1;
+            bit_cnt          <= 4'd0;
+            tx_shift         <= 8'd0;
+            msb_reg          <= 8'd0;
+            lsb_reg          <= 8'd0;
+            data_out         <= 16'd0;
+            reg_addr_lat     <= 8'd0;
+            pending_reg_addr <= 8'd0;
+            have_pending     <= 1'b0;
+            need_init        <= 1'b1;
+            op_mode          <= OP_READ;
+            init_done        <= 1'b0;
+        end else begin
+            done <= 1'b0;
+
+            // Force a stop if a transaction exceeds the watchdog timeout
+            if (wd_hit && (state != ST_IDLE) && (state != ST_DONE)) begin
+                error   <= 1'b1;
+                sda_oe  <= 1'b1;
+                sda_out <= 1'b1;
+                state   <= ST_STOP;
+            end else begin
+                case (state)
+
+                    ST_IDLE: begin
+                        busy    <= 1'b0;
+                        sda_oe  <= 1'b0;
+                        sda_out <= 1'b1;
+                        bit_cnt <= 4'd0;
+
+                        if (start_pulse) begin
+                            error            <= 1'b0;
+                            busy             <= 1'b1;
+                            have_pending     <= 1'b1;
+                            pending_reg_addr <= reg_addr;
+
+                            if (need_init) begin
+                                op_mode      <= OP_INIT;
+                                reg_addr_lat <= REG_PWR_MGMT;
+                            end else begin
+                                op_mode      <= OP_READ;
+                                reg_addr_lat <= reg_addr;
+                            end
+
+                            // START condition: SDA goes low while SCL is high
+                            sda_oe   <= 1'b1;
+                            sda_out  <= 1'b0;
+                            tx_shift <= {MPU_ADDR, 1'b0};
+                            bit_cnt  <= 4'd7;
+                            state    <= ST_START;
+                        end
+                    end
+
+                    ST_START: begin
+                        if (scl_fall) begin
+                            sda_oe  <= 1'b1;
+                            sda_out <= tx_shift[7];
+                            state   <= ST_ADDR_WR;
+                        end
+                    end
+
+                    ST_ADDR_WR: begin
+                        if (scl_rise) begin
+                            if (bit_cnt == 0) begin
+                                sda_oe <= 1'b0;
+                                state  <= ST_ADDR_WR_ACK;
+                            end else begin
+                                bit_cnt  <= bit_cnt - 4'd1;
+                                tx_shift <= {tx_shift[6:0], 1'b0};
+                            end
+                        end else if (scl_fall && (bit_cnt != 0)) begin
+                            sda_oe  <= 1'b1;
+                            sda_out <= tx_shift[7];
+                        end
+                    end
+
+                    ST_ADDR_WR_ACK: begin
+                        if (scl_rise) begin
+                            if (sda_in) begin
+                                error   <= 1'b1;
+                                sda_oe  <= 1'b1;
+                                sda_out <= 1'b0;
+                                state   <= ST_STOP;
+                            end else begin
+                                tx_shift <= reg_addr_lat;
+                                bit_cnt  <= 4'd7;
+                                sda_oe   <= 1'b1;
+                                sda_out  <= reg_addr_lat[7];
+                                state    <= ST_REG_ADDR;
+                            end
+                        end
+                    end
+
+                    ST_REG_ADDR: begin
+                        if (scl_rise) begin
+                            if (bit_cnt == 0) begin
+                                sda_oe <= 1'b0;
+                                state  <= ST_REG_ADDR_ACK;
+                            end else begin
+                                bit_cnt  <= bit_cnt - 4'd1;
+                                tx_shift <= {tx_shift[6:0], 1'b0};
+                            end
+                        end else if (scl_fall && (bit_cnt != 0)) begin
+                            sda_oe  <= 1'b1;
+                            sda_out <= tx_shift[7];
+                        end
+                    end
+
+                    ST_REG_ADDR_ACK: begin
+                        if (scl_rise) begin
+                            if (sda_in) begin
+                                error   <= 1'b1;
+                                sda_oe  <= 1'b1;
+                                sda_out <= 1'b0;
+                                state   <= ST_STOP;
+                            end else begin
+                                if (op_mode == OP_INIT) begin
+                                    tx_shift <= PWR_MGMT_VAL;
+                                    bit_cnt  <= 4'd7;
+                                    sda_oe   <= 1'b1;
+                                    sda_out  <= PWR_MGMT_VAL[7];
+                                    state    <= ST_INIT_DATA;
+                                end else begin
+                                    tx_shift <= {MPU_ADDR, 1'b1};
+                                    bit_cnt  <= 4'd7;
+                                    sda_oe   <= 1'b1;
+                                    sda_out  <= 1'b1;
+                                    state    <= ST_REP_START;
+                                end
+                            end
+                        end
+                    end
+
+                    ST_INIT_DATA: begin
+                        if (scl_rise) begin
+                            if (bit_cnt == 0) begin
+                                sda_oe <= 1'b0;
+                                state  <= ST_INIT_DATA_ACK;
+                            end else begin
+                                bit_cnt  <= bit_cnt - 4'd1;
+                                tx_shift <= {tx_shift[6:0], 1'b0};
+                            end
+                        end else if (scl_fall && (bit_cnt != 0)) begin
+                            sda_oe  <= 1'b1;
+                            sda_out <= tx_shift[7];
+                        end
+                    end
+
+                    ST_INIT_DATA_ACK: begin
+                        if (scl_rise) begin
+                            if (sda_in) begin
+                                error   <= 1'b1;
+                                sda_oe  <= 1'b1;
+                                sda_out <= 1'b0;
+                                state   <= ST_STOP;
+                            end else begin
+                                need_init <= 1'b0;
+                                init_done <= 1'b1;
+                                state     <= ST_STOP;
+                            end
+                        end
+                    end
+
+                    ST_REP_START: begin
+                        sda_oe  <= 1'b1;
+                        sda_out <= 1'b0;
+
+                        if (scl_fall) begin
+                            sda_oe  <= 1'b1;
+                            sda_out <= tx_shift[7];
+                            state   <= ST_ADDR_RD;
+                        end
+                    end
+
+                    ST_ADDR_RD: begin
+                        if (scl_rise) begin
+                            if (bit_cnt == 0) begin
+                                sda_oe <= 1'b0;
+                                state  <= ST_ADDR_RD_ACK;
+                            end else begin
+                                bit_cnt  <= bit_cnt - 4'd1;
+                                tx_shift <= {tx_shift[6:0], 1'b0};
+                            end
+                        end else if (scl_fall && (bit_cnt != 0)) begin
+                            sda_oe  <= 1'b1;
+                            sda_out <= tx_shift[7];
+                        end
+                    end
+
+                    ST_ADDR_RD_ACK: begin
+                        if (scl_rise) begin
+                            if (sda_in) begin
+                                error   <= 1'b1;
+                                sda_oe  <= 1'b1;
+                                sda_out <= 1'b0;
+                                state   <= ST_STOP;
+                            end else begin
+                                bit_cnt <= 4'd7;
+                                msb_reg <= 8'd0;
+                                sda_oe  <= 1'b0;
+                                state   <= ST_READ_MSB;
+                            end
+                        end
+                    end
+
+                    ST_READ_MSB: begin
+                        if (scl_rise) begin
+                            msb_reg[bit_cnt] <= sda_in;
+                            if (bit_cnt == 0)
+                                state <= ST_MASTER_ACK;
+                            else
+                                bit_cnt <= bit_cnt - 4'd1;
+                        end
+                    end
+
+                    ST_MASTER_ACK: begin
+                        if (scl_fall) begin
+                            sda_oe  <= 1'b1;
+                            sda_out <= 1'b0;
+                        end
+                        if (scl_rise) begin
+                            sda_oe  <= 1'b0;
+                            bit_cnt <= 4'd7;
+                            lsb_reg <= 8'd0;
+                            state   <= ST_READ_LSB;
+                        end
+                    end
+
+                    ST_READ_LSB: begin
+                        if (scl_rise) begin
+                            lsb_reg[bit_cnt] <= sda_in;
+                            if (bit_cnt == 0)
+                                state <= ST_MASTER_NACK;
+                            else
+                                bit_cnt <= bit_cnt - 4'd1;
+                        end
+                    end
+
+                    ST_MASTER_NACK: begin
+                        if (scl_fall) begin
+                            sda_oe  <= 1'b1;
+                            sda_out <= 1'b1;
+                        end
+                        if (scl_rise) begin
+                            state <= ST_STOP;
+                        end
+                    end
+
+                    ST_STOP: begin
+                        if (scl_fall) begin
+                            sda_oe  <= 1'b1;
+                            sda_out <= 1'b0;
+                        end
+                        if (scl_rise) begin
+                            sda_oe  <= 1'b0;
+                            state   <= ST_DONE;
+                        end
+                    end
+
+                    ST_DONE: begin
+                        if (op_mode == OP_READ) begin
+                            busy         <= 1'b0;
+                            done         <= 1'b1;
+                            data_out     <= {msb_reg, lsb_reg};
+                            have_pending <= 1'b0;
+                            state        <= ST_IDLE;
+                        end else begin
+                            if (error || !have_pending) begin
+                                busy         <= 1'b0;
+                                done         <= 1'b1;
+                                have_pending <= 1'b0;
+                                state        <= ST_IDLE;
+                            end else begin
+                                op_mode      <= OP_READ;
+                                reg_addr_lat <= pending_reg_addr;
+                                sda_oe       <= 1'b1;
+                                sda_out      <= 1'b0;
+                                tx_shift     <= {MPU_ADDR, 1'b0};
+                                bit_cnt      <= 4'd7;
+                                state        <= ST_START;
+                            end
+                        end
+                    end
+
+                    default: state <= ST_IDLE;
+                endcase
+            end
+        end
+    end
+
+endmodule
